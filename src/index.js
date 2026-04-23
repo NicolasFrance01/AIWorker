@@ -82,9 +82,9 @@ async function connectToWhatsApp() {
       const ADMIN = process.env.ADMIN_PHONE || '5493516002716'
       if (phone === ADMIN) return
 
-      const ALLOWED = process.env.ALLOWED_PHONES ? process.env.ALLOWED_PHONES.split(',').map(p => p.trim()) : []
-      if (ALLOWED.length > 0 && !ALLOWED.includes(phone)) {
-        console.log(`[BLOQUEADO] ${phone} (${msg.pushName}) no está en la whitelist`)
+      const ALLOWED = (process.env.ALLOWED_PHONES || '29463626682562').split(',').map(p => p.trim())
+      if (!ALLOWED.includes(phone)) {
+        console.log(`[BLOQUEADO] ${phone} (${msg.pushName})`)
         return
       }
 
