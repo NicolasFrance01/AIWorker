@@ -1,7 +1,7 @@
 import pkg from '@whiskeysockets/baileys'
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } = pkg
 import { Boom } from '@hapi/boom'
-import qrcode from 'qrcode-terminal'
+import QRCode from 'qrcode'
 import cron from 'node-cron'
 import http from 'http'
 import dotenv from 'dotenv'
@@ -14,6 +14,7 @@ dotenv.config()
 let messageCount = 0
 let restartCount = 0
 const startTime = Date.now()
+let latestQR = null
 
 async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info')
@@ -34,9 +35,8 @@ async function connectToWhatsApp() {
     const { connection, lastDisconnect, qr } = update
 
     if (qr) {
-      console.log('\n=== ESCANEA ESTE QR CON WHATSAPP ===')
-      qrcode.generate(qr, { small: true })
-      console.log('=====================================\n')
+      latestQR = qr
+      console.log('Nuevo QR generado. Escanealo en: /qr')
     }
 
     if (connection === 'close') {
@@ -111,8 +111,8 @@ async function connectToWhatsApp() {
   return sock
 }
 
-// ── Health check endpoint para Render y UptimeRobot ──────────────────
-const server = http.createServer((req, res) => {
+// ── Health check + QR endpoint ────────────────────────────────────────
+const server = http.createServer(async (req, res) => {
   if (req.url === '/health') {
     const uptimeMin = Math.floor((Date.now() - startTime) / 1000 / 60)
     res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -123,6 +123,20 @@ const server = http.createServer((req, res) => {
       restarts: restartCount,
       timestamp: new Date().toISOString()
     }))
+  } else if (req.url === '/qr') {
+    if (!latestQR) {
+      res.writeHead(200, { 'Content-Type': 'text/html' })
+      res.end('<h2>No hay QR disponible — WhatsApp ya está conectado o esperando reconexión.</h2>')
+      return
+    }
+    const qrImage = await QRCode.toDataURL(latestQR)
+    res.writeHead(200, { 'Content-Type': 'text/html' })
+    res.end(`<!DOCTYPE html><html><body style="display:flex;flex-direction:column;align-items:center;font-family:sans-serif;padding:40px">
+      <h2>Escaneá con WhatsApp</h2>
+      <img src="${qrImage}" style="width:300px;height:300px"/>
+      <p>Abrí WhatsApp → Dispositivos vinculados → Vincular dispositivo</p>
+      <p><small>Recargá si expiró</small></p>
+    </body></html>`)
   } else {
     res.writeHead(404)
     res.end()
