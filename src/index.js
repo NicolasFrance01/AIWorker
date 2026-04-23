@@ -1,9 +1,5 @@
-import makeWASocket, {
-  useMultiFileAuthState,
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-  downloadMediaMessage
-} from '@whiskeysockets/baileys'
+import pkg from '@whiskeysockets/baileys'
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } = pkg
 import { Boom } from '@hapi/boom'
 import qrcode from 'qrcode-terminal'
 import cron from 'node-cron'
