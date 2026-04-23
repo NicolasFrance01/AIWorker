@@ -8,13 +8,13 @@
     "dev": "node --watch src/index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.9",
-    "@hapi/boom": "^10.0.1",
     "@google/generative-ai": "^0.21.0",
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.9",
+    "dotenv": "^16.4.7",
     "groq-sdk": "^0.9.0",
     "node-cron": "^3.0.3",
-    "pg": "^8.13.1",
-    "qrcode-terminal": "^0.12.0",
-    "dotenv": "^16.4.7"
+    "pg": "^8.20.0",
+    "qrcode": "^1.5.4"
   }
 }
