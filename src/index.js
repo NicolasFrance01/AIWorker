@@ -74,7 +74,10 @@ async function connectToWhatsApp() {
       if (!msg.message) return
 
       const phone = msg.key.remoteJid?.replace('@s.whatsapp.net', '')
-      if (!phone || msg.key.remoteJid?.endsWith('@g.us')) return // ignorar grupos
+      if (!phone || msg.key.remoteJid?.endsWith('@g.us')) return
+
+      const TESTER = process.env.TESTER_PHONE || '5493512011783'
+      if (phone !== TESTER) return
 
       const text =
         msg.message.conversation ||
