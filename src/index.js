@@ -104,29 +104,31 @@ async function connectToWhatsApp() {
       if (!jid) continue
       if (jid.endsWith('@g.us')) continue                   // ignorar grupos
       if (jid === 'status@broadcast') continue              // ignorar estados/stories
-      if (jid.endsWith('@lid')) {
-        console.log(`[LID] ignorando: ${jid}`)
-        continue  // @lid son IDs internos de WA, no son teléfonos
-      }
-      if (!jid.endsWith('@s.whatsapp.net')) {
+      // WhatsApp usa @lid (ID interno) en cuentas nuevas en vez del número real
+      const isLid = jid.endsWith('@lid')
+      const isPhone = jid.endsWith('@s.whatsapp.net')
+      if (!isPhone && !isLid) {
         console.log(`[SKIP] JID desconocido: ${jid}`)
         continue
       }
 
-      const phone = jid.replace('@s.whatsapp.net', '')
-      console.log(`[MSG] jid=${jid} phone=${phone} name=${msg.pushName}`)
+      const identifier = isPhone
+        ? jid.replace('@s.whatsapp.net', '')
+        : jid.replace('@lid', '')
+
+      console.log(`[MSG] jid=${jid} id=${identifier} lid=${isLid} name=${msg.pushName}`)
 
       const ADMIN = process.env.ADMIN_PHONE || '5493516002716'
-      if (phone === ADMIN) return
+      if (identifier === ADMIN) continue
 
-      // Whitelist: número en formato internacional sin + (ej: 5493512011783)
-      // Configurar en Render como variable de entorno ALLOWED_PHONES
-      const ALLOWED = (process.env.ALLOWED_PHONES || '5493512011783').split(',').map(p => p.trim())
-      if (!ALLOWED.includes(phone)) {
-        console.log(`[BLOQUEADO] "${phone}" no está en whitelist [${ALLOWED.join(', ')}]`)
-        return
+      // ALLOWED_PHONES acepta números Y/O LIDs separados por coma
+      // Ej en Render: ALLOWED_PHONES=5493512011783,29463626682562
+      const ALLOWED = (process.env.ALLOWED_PHONES || '5493512011783,29463626682562').split(',').map(p => p.trim())
+      if (!ALLOWED.includes(identifier)) {
+        console.log(`[BLOQUEADO] "${identifier}" no está en whitelist [${ALLOWED.join(', ')}]`)
+        continue
       }
-      console.log(`[PERMITIDO] ${phone} (${msg.pushName})`)
+      console.log(`[PERMITIDO] ${identifier} (${msg.pushName})`)
 
       const text = msg.message.conversation || msg.message.extendedTextMessage?.text || ''
       const hasImage = !!msg.message.imageMessage
@@ -135,7 +137,7 @@ async function connectToWhatsApp() {
       try {
         if (hasImage) imageBuffer = await downloadMediaMessage(msg, 'buffer', {})
 
-        const contact = await db.upsertContact(phone, msg.pushName || '')
+        const contact = await db.upsertContact(identifier, msg.pushName || '')
         const history = await db.getRecentMessages(contact.conversation_id, 10)
         const reply   = await getAIReply({ text, hasImage, imageBuffer, history })
 
@@ -144,9 +146,9 @@ async function connectToWhatsApp() {
         await sock.sendMessage(msg.key.remoteJid, { text: reply })
 
         messageCount++
-        console.log(`[${phone}] → "${text.substring(0, 40)}" → "${reply.substring(0, 40)}"`)
+        console.log(`[${identifier}] → "${text.substring(0, 40)}" → "${reply.substring(0, 40)}"`)
       } catch (err) {
-        console.error(`Error procesando mensaje de ${phone}:`, err.message)
+        console.error(`Error procesando mensaje de ${identifier}:`, err.message)
       }
     }
   })
