@@ -97,14 +97,20 @@ async function connectToWhatsApp() {
     if (type !== 'notify') return
 
     for (const msg of messages) {
-      if (msg.key.fromMe) return
-      if (!msg.message) return
+      if (msg.key.fromMe) continue          // saltar propios
+      if (!msg.message) continue            // saltar vacíos
 
       const jid = msg.key.remoteJid || ''
-      if (!jid || jid.endsWith('@g.us')) return   // ignorar grupos
+      if (!jid) continue
+      if (jid.endsWith('@g.us')) continue                   // ignorar grupos
+      if (jid === 'status@broadcast') continue              // ignorar estados/stories
       if (jid.endsWith('@lid')) {
         console.log(`[LID] ignorando: ${jid}`)
-        return  // @lid son IDs internos de WA, no son números de teléfono
+        continue  // @lid son IDs internos de WA, no son teléfonos
+      }
+      if (!jid.endsWith('@s.whatsapp.net')) {
+        console.log(`[SKIP] JID desconocido: ${jid}`)
+        continue
       }
 
       const phone = jid.replace('@s.whatsapp.net', '')
