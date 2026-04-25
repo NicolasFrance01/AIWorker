@@ -9,7 +9,7 @@ export const db = {
     const { rows } = await pool.query(`
       INSERT INTO contacts (phone, name, last_contact_at)
       VALUES ($1, $2, NOW())
-      ON CONFLICT (phone) DO UPDATE 
+      ON CONFLICT (phone) DO UPDATE
         SET last_contact_at = NOW(),
             name = COALESCE($2, contacts.name)
       RETURNING *
@@ -60,17 +60,61 @@ export const db = {
     return rows[0]
   },
 
+  async updateAISettings(data) {
+    const { personality_prompt, business_description, welcome_message, goals, restrictions } = data
+    await pool.query(`
+      UPDATE ai_settings SET
+        personality_prompt   = COALESCE($1, personality_prompt),
+        business_description = COALESCE($2, business_description),
+        welcome_message      = COALESCE($3, welcome_message),
+        goals                = COALESCE($4, goals),
+        restrictions         = COALESCE($5, restrictions),
+        updated_at           = NOW()
+      WHERE id = (SELECT id FROM ai_settings LIMIT 1)
+    `, [personality_prompt, business_description, welcome_message, goals, restrictions])
+    return this.getAISettings()
+  },
+
+  async getConversations() {
+    const { rows } = await pool.query(`
+      SELECT
+        conv.id,
+        conv.last_message_at,
+        c.phone,
+        c.name,
+        c.first_contact_at,
+        (SELECT content FROM messages WHERE conversation_id = conv.id ORDER BY created_at DESC LIMIT 1) AS last_message,
+        (SELECT sender  FROM messages WHERE conversation_id = conv.id ORDER BY created_at DESC LIMIT 1) AS last_sender,
+        (SELECT COUNT(*) FROM messages WHERE conversation_id = conv.id)::int AS message_count
+      FROM conversations conv
+      JOIN contacts c ON c.id = conv.contact_id
+      ORDER BY conv.last_message_at DESC NULLS LAST
+      LIMIT 100
+    `)
+    return rows
+  },
+
+  async getMessages(conversationId) {
+    const { rows } = await pool.query(`
+      SELECT id, sender, type, content, created_at
+      FROM messages
+      WHERE conversation_id = $1
+      ORDER BY created_at ASC
+    `, [conversationId])
+    return rows
+  },
+
   async getStats() {
-    const msgs = await pool.query(`
-      SELECT COUNT(*) as total FROM messages 
+    const msgs24h = await pool.query(`
+      SELECT COUNT(*) as total FROM messages
       WHERE created_at > NOW() - INTERVAL '24 hours'
     `)
-    const contacts = await pool.query(`
-      SELECT COUNT(*) as total FROM contacts
-    `)
+    const contacts = await pool.query(`SELECT COUNT(*) as total FROM contacts`)
+    const total    = await pool.query(`SELECT COUNT(*) as total FROM messages`)
     return {
-      messages_24h: parseInt(msgs.rows[0].total),
-      total_contacts: parseInt(contacts.rows[0].total)
+      messages_24h:    parseInt(msgs24h.rows[0].total),
+      total_contacts:  parseInt(contacts.rows[0].total),
+      total_messages:  parseInt(total.rows[0].total),
     }
   }
 }
