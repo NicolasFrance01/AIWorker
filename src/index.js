@@ -101,19 +101,26 @@ async function connectToWhatsApp() {
       if (!msg.message) return
 
       const jid = msg.key.remoteJid || ''
-      if (!jid || jid.endsWith('@g.us')) return
+      if (!jid || jid.endsWith('@g.us')) return   // ignorar grupos
+      if (jid.endsWith('@lid')) {
+        console.log(`[LID] ignorando: ${jid}`)
+        return  // @lid son IDs internos de WA, no son números de teléfono
+      }
 
-      const phone = jid.replace('@s.whatsapp.net', '').replace('@lid', '')
+      const phone = jid.replace('@s.whatsapp.net', '')
       console.log(`[MSG] jid=${jid} phone=${phone} name=${msg.pushName}`)
 
       const ADMIN = process.env.ADMIN_PHONE || '5493516002716'
       if (phone === ADMIN) return
 
-      const ALLOWED = (process.env.ALLOWED_PHONES || '29463626682562').split(',').map(p => p.trim())
+      // Whitelist: número en formato internacional sin + (ej: 5493512011783)
+      // Configurar en Render como variable de entorno ALLOWED_PHONES
+      const ALLOWED = (process.env.ALLOWED_PHONES || '5493512011783').split(',').map(p => p.trim())
       if (!ALLOWED.includes(phone)) {
-        console.log(`[BLOQUEADO] ${phone} (${msg.pushName})`)
+        console.log(`[BLOQUEADO] "${phone}" no está en whitelist [${ALLOWED.join(', ')}]`)
         return
       }
+      console.log(`[PERMITIDO] ${phone} (${msg.pushName})`)
 
       const text = msg.message.conversation || msg.message.extendedTextMessage?.text || ''
       const hasImage = !!msg.message.imageMessage
