@@ -111,10 +111,47 @@ export const db = {
     `)
     const contacts = await pool.query(`SELECT COUNT(*) as total FROM contacts`)
     const total    = await pool.query(`SELECT COUNT(*) as total FROM messages`)
+    const convs    = await pool.query(`SELECT COUNT(*) as total FROM conversations`)
+    const aiMsgs   = await pool.query(`SELECT COUNT(*) as total FROM messages WHERE sender = 'ai'`)
     return {
       messages_24h:    parseInt(msgs24h.rows[0].total),
       total_contacts:  parseInt(contacts.rows[0].total),
       total_messages:  parseInt(total.rows[0].total),
+      total_conversations: parseInt(convs.rows[0].total),
+      ai_messages:     parseInt(aiMsgs.rows[0].total),
     }
+  },
+
+  async getWeeklyActivity() {
+    const { rows } = await pool.query(`
+      SELECT
+        DATE_TRUNC('day', created_at AT TIME ZONE 'America/Argentina/Buenos_Aires') AS day,
+        COUNT(*) FILTER (WHERE sender = 'client') AS client_msgs,
+        COUNT(*) FILTER (WHERE sender = 'ai')     AS ai_msgs
+      FROM messages
+      WHERE created_at > NOW() - INTERVAL '7 days'
+      GROUP BY 1
+      ORDER BY 1
+    `)
+    return rows.map(r => ({
+      day: r.day,
+      client: parseInt(r.client_msgs),
+      ai: parseInt(r.ai_msgs),
+    }))
+  },
+
+  async getHourlyActivity() {
+    const { rows } = await pool.query(`
+      SELECT
+        EXTRACT(HOUR FROM created_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::int AS hour,
+        COUNT(*) AS total
+      FROM messages
+      WHERE created_at > NOW() - INTERVAL '24 hours'
+      GROUP BY 1
+      ORDER BY 1
+    `)
+    const result = Array.from({ length: 24 }, (_, h) => ({ hour: h, total: 0 }))
+    for (const r of rows) result[r.hour].total = parseInt(r.total)
+    return result
   }
 }

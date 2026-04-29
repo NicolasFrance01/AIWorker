@@ -267,6 +267,26 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // GET /api/stats/weekly
+  if (url === '/api/stats/weekly' && req.method === 'GET') {
+    try {
+      const data = await db.getWeeklyActivity()
+      return json(res, { data })
+    } catch (err) {
+      return json(res, { error: err.message }, 500)
+    }
+  }
+
+  // GET /api/stats/hourly
+  if (url === '/api/stats/hourly' && req.method === 'GET') {
+    try {
+      const data = await db.getHourlyActivity()
+      return json(res, { data })
+    } catch (err) {
+      return json(res, { error: err.message }, 500)
+    }
+  }
+
   // GET /api/conversations
   if (url === '/api/conversations' && req.method === 'GET') {
     try {
