@@ -130,23 +130,29 @@ async function connectToWhatsApp() {
       }
       console.log(`[PERMITIDO] ${identifier} (${msg.pushName})`)
 
-      const text = msg.message.conversation || msg.message.extendedTextMessage?.text || ''
+      const text     = msg.message.conversation || msg.message.extendedTextMessage?.text || ''
       const hasImage = !!msg.message.imageMessage
+      const hasAudio = !!msg.message.audioMessage || !!msg.message.pttMessage
+      const audioMime = msg.message.audioMessage?.mimetype || msg.message.pttMessage?.mimetype || 'audio/ogg'
       let imageBuffer = null
+      let audioBuffer = null
 
       try {
         if (hasImage) imageBuffer = await downloadMediaMessage(msg, 'buffer', {})
+        if (hasAudio) audioBuffer = await downloadMediaMessage(msg, 'buffer', {})
 
         const contact = await db.upsertContact(identifier, msg.pushName || '')
         const history = await db.getRecentMessages(contact.conversation_id, 10)
-        const reply   = await getAIReply({ text, hasImage, imageBuffer, history })
+        const reply   = await getAIReply({ text, hasImage, imageBuffer, hasAudio, audioBuffer, audioMime, history })
 
-        await db.saveMessage(contact.conversation_id, 'client', text || '[imagen]')
+        const saved = text || (hasImage ? '[imagen]' : hasAudio ? '[audio]' : '[mensaje]')
+        await db.saveMessage(contact.conversation_id, 'client', saved)
         await db.saveMessage(contact.conversation_id, 'ai', reply)
         await sock.sendMessage(msg.key.remoteJid, { text: reply })
 
         messageCount++
-        console.log(`[${identifier}] → "${text.substring(0, 40)}" → "${reply.substring(0, 40)}"`)
+        const preview = text || (hasImage ? '[imagen]' : '[audio]')
+        console.log(`[${identifier}] → "${preview.substring(0, 40)}" → "${reply.substring(0, 40)}"`)
       } catch (err) {
         console.error(`Error procesando mensaje de ${identifier}:`, err.message)
       }
@@ -325,6 +331,102 @@ const server = http.createServer(async (req, res) => {
       const settings = await db.updateAISettings(body)
       console.log('[Config] Configuración actualizada desde el dashboard')
       return json(res, { ok: true, settings })
+    } catch (err) {
+      return json(res, { error: err.message }, 500)
+    }
+  }
+
+  // ── Products CRUD ────────────────────────────────────────────────
+
+  // GET /api/products
+  if (url === '/api/products' && req.method === 'GET') {
+    try {
+      const products = await db.getProducts()
+      return json(res, { products })
+    } catch (err) {
+      return json(res, { error: err.message }, 500)
+    }
+  }
+
+  // POST /api/products
+  if (url === '/api/products' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req)
+      const product = await db.createProduct(body)
+      // Save images if provided
+      if (body.images?.length) {
+        for (const img of body.images) {
+          if (img.src) await db.addProductImage(product.id, img.src, img.name || null)
+        }
+      }
+      console.log(`[Productos] Creado: ${product.name}`)
+      return json(res, { ok: true, product })
+    } catch (err) {
+      return json(res, { error: err.message }, 500)
+    }
+  }
+
+  // PUT /api/products/:id
+  const prodMatch = url.match(/^\/api\/products\/(\d+)$/)
+  if (prodMatch && req.method === 'PUT') {
+    try {
+      const body = await parseBody(req)
+      const id = parseInt(prodMatch[1])
+      const product = await db.updateProduct(id, body)
+      // New images (have src but no id) → insert
+      if (Array.isArray(body.images)) {
+        for (const img of body.images) {
+          if (img.src && !img.id) await db.addProductImage(id, img.src, img.name || null)
+        }
+      }
+      console.log(`[Productos] Actualizado: ${product?.name}`)
+      return json(res, { ok: true, product })
+    } catch (err) {
+      return json(res, { error: err.message }, 500)
+    }
+  }
+
+  // DELETE /api/products/:id
+  if (prodMatch && req.method === 'DELETE') {
+    try {
+      await db.deleteProduct(parseInt(prodDelMatch[1]))
+      return json(res, { ok: true })
+    } catch (err) {
+      return json(res, { error: err.message }, 500)
+    }
+  }
+
+  // ── Catalog images CRUD ──────────────────────────────────────────
+
+  // GET /api/catalog
+  if (url === '/api/catalog' && req.method === 'GET') {
+    try {
+      const images = await db.getCatalogImages()
+      return json(res, { images })
+    } catch (err) {
+      return json(res, { error: err.message }, 500)
+    }
+  }
+
+  // POST /api/catalog
+  if (url === '/api/catalog' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req)
+      if (!body.name || !body.image_data) return json(res, { error: 'name e image_data requeridos' }, 400)
+      const image = await db.addCatalogImage(body)
+      console.log(`[Catálogo] Imagen agregada: ${body.name}`)
+      return json(res, { ok: true, image })
+    } catch (err) {
+      return json(res, { error: err.message }, 500)
+    }
+  }
+
+  // DELETE /api/catalog/:id
+  const catDelMatch = url.match(/^\/api\/catalog\/(\d+)$/)
+  if (catDelMatch && req.method === 'DELETE') {
+    try {
+      await db.deleteCatalogImage(parseInt(catDelMatch[1]))
+      return json(res, { ok: true })
     } catch (err) {
       return json(res, { error: err.message }, 500)
     }
