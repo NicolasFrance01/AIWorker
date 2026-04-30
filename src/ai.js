@@ -47,13 +47,14 @@ const AGENT_PROMPTS = {
 
 // ── Construir system prompt completo ────────────────────────────
 async function buildSystemPrompt(agentType, settings) {
-  const base = settings.personality_prompt || AGENT_PROMPTS[agentType] || AGENT_PROMPTS.generalista
+  // Use DB agent prompt override if the admin customized it, otherwise use defaults
+  const agentOverride = settings.agent_prompts?.[agentType]
+  const base = agentOverride || AGENT_PROMPTS[agentType] || AGENT_PROMPTS.generalista
 
-  const agentContext = AGENT_PROMPTS[agentType]
   const businessCtx = `\nNegocio: ${settings.business_description || 'EDIFICA Obras y Servicios, Córdoba'}
 📍 Showroom: Pehuajo 2721 | ⏰ L-V 9-18hs | 📧 contactanos@edifica.com | 📱 +54 9 3518 00-7584`
 
-  // Agregar catálogo de productos al prompt
+  // Product catalogue
   let productContext = ''
   try {
     const products = await db.getActiveProducts()
@@ -73,7 +74,17 @@ async function buildSystemPrompt(agentType, settings) {
     console.error('[AI] Error cargando catálogo:', err.message)
   }
 
-  return `${base}\n\n${agentContext}${businessCtx}${productContext}\n\nReglas: Respondé en español rioplatense, mensajes cortos y claros (WhatsApp), nunca inventes precios exactos sin visita previa.`
+  // FAQs
+  let faqContext = ''
+  try {
+    const faqs = Array.isArray(settings.faqs) ? settings.faqs : []
+    if (faqs.length > 0) {
+      const faqBlock = faqs.map(f => `P: ${f.q}\nR: ${f.a}`).join('\n\n')
+      faqContext = `\n\n━━━ PREGUNTAS FRECUENTES ━━━\n${faqBlock}`
+    }
+  } catch {}
+
+  return `${base}${businessCtx}${productContext}${faqContext}\n\nReglas: Respondé en español rioplatense, mensajes cortos y claros (WhatsApp), nunca inventes precios exactos sin visita previa.`
 }
 
 // ── Generar resumen de conversación para el asesor ───────────────

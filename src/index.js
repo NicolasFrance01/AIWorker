@@ -125,9 +125,25 @@ async function connectToWhatsApp() {
 
       if (identifier === ADMIN) continue
 
-      const ALLOWED = (process.env.ALLOWED_PHONES || '5493512011783,29463626682562').split(',').map(p => p.trim())
-      if (!ALLOWED.includes(identifier)) {
+      // Blacklist global (nadie puede chatear)
+      if (settings?.blacklist_all) {
+        console.log(`[BLOQUEADO] Blacklist global activa — ignorando ${identifier}`)
+        continue
+      }
+
+      // Whitelist (solo ciertos números permitidos)
+      const ALLOWED = (settings?.allowed_phones?.length)
+        ? settings.allowed_phones
+        : (process.env.ALLOWED_PHONES || '').split(',').map(p => p.trim()).filter(Boolean)
+      if (ALLOWED.length > 0 && !ALLOWED.includes(identifier)) {
         console.log(`[BLOQUEADO] "${identifier}" no está en whitelist [${ALLOWED.join(', ')}]`)
+        continue
+      }
+
+      // Blacklist específica (números bloqueados individualmente)
+      const BLACKLIST = settings?.blacklist_phones || []
+      if (BLACKLIST.includes(identifier)) {
+        console.log(`[BLOQUEADO] "${identifier}" está en blacklist`)
         continue
       }
       console.log(`[PERMITIDO] ${identifier} (${msg.pushName})`)
@@ -410,7 +426,7 @@ const server = http.createServer(async (req, res) => {
   // DELETE /api/products/:id
   if (prodMatch && req.method === 'DELETE') {
     try {
-      await db.deleteProduct(parseInt(prodDelMatch[1]))
+      await db.deleteProduct(parseInt(prodMatch[1]))
       return json(res, { ok: true })
     } catch (err) {
       return json(res, { error: err.message }, 500)
@@ -436,6 +452,18 @@ const server = http.createServer(async (req, res) => {
       if (!body.name || !body.image_data) return json(res, { error: 'name e image_data requeridos' }, 400)
       const image = await db.addCatalogImage(body)
       console.log(`[Catálogo] Imagen agregada: ${body.name}`)
+      return json(res, { ok: true, image })
+    } catch (err) {
+      return json(res, { error: err.message }, 500)
+    }
+  }
+
+  // PUT /api/catalog/:id
+  const catEditMatch = url.match(/^\/api\/catalog\/(\d+)$/)
+  if (catEditMatch && req.method === 'PUT') {
+    try {
+      const body = await parseBody(req)
+      const image = await db.updateCatalogImage(parseInt(catEditMatch[1]), body)
       return json(res, { ok: true, image })
     } catch (err) {
       return json(res, { error: err.message }, 500)

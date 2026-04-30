@@ -4,6 +4,15 @@ dotenv.config()
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL })
 
+// Run once on startup — idempotent (IF NOT EXISTS)
+pool.query(`
+  ALTER TABLE ai_settings
+    ADD COLUMN IF NOT EXISTS blacklist_phones TEXT[]  DEFAULT '{}',
+    ADD COLUMN IF NOT EXISTS blacklist_all    BOOLEAN DEFAULT false,
+    ADD COLUMN IF NOT EXISTS agent_prompts    JSONB   DEFAULT '{}',
+    ADD COLUMN IF NOT EXISTS faqs             JSONB   DEFAULT '[]'
+`).catch(e => console.error('[DB migration]', e.message))
+
 export const db = {
   // ── WhatsApp ──────────────────────────────────────────────────────
   async upsertContact(phone, name) {
@@ -62,19 +71,37 @@ export const db = {
   },
 
   async updateAISettings(data) {
-    const { personality_prompt, business_description, welcome_message, goals, restrictions, admin_phone, redirect_phone } = data
+    const {
+      personality_prompt, business_description, welcome_message, goals, restrictions,
+      admin_phone, redirect_phone,
+      allowed_phones, blacklist_phones, blacklist_all,
+      agent_prompts, faqs,
+    } = data
     await pool.query(`
       UPDATE ai_settings SET
-        personality_prompt   = COALESCE($1, personality_prompt),
-        business_description = COALESCE($2, business_description),
-        welcome_message      = COALESCE($3, welcome_message),
-        goals                = COALESCE($4, goals),
-        restrictions         = COALESCE($5, restrictions),
-        admin_phone          = COALESCE($6, admin_phone),
-        redirect_phone       = COALESCE($7, redirect_phone),
+        personality_prompt   = COALESCE($1,  personality_prompt),
+        business_description = COALESCE($2,  business_description),
+        welcome_message      = COALESCE($3,  welcome_message),
+        goals                = COALESCE($4,  goals),
+        restrictions         = COALESCE($5,  restrictions),
+        admin_phone          = COALESCE($6,  admin_phone),
+        redirect_phone       = COALESCE($7,  redirect_phone),
+        allowed_phones       = COALESCE($8,  allowed_phones),
+        blacklist_phones     = COALESCE($9,  blacklist_phones),
+        blacklist_all        = COALESCE($10, blacklist_all),
+        agent_prompts        = COALESCE($11, agent_prompts),
+        faqs                 = COALESCE($12, faqs),
         updated_at           = NOW()
       WHERE id = (SELECT id FROM ai_settings LIMIT 1)
-    `, [personality_prompt, business_description, welcome_message, goals, restrictions, admin_phone || null, redirect_phone || null])
+    `, [
+      personality_prompt, business_description, welcome_message, goals, restrictions,
+      admin_phone || null, redirect_phone || null,
+      Array.isArray(allowed_phones)  ? allowed_phones  : null,
+      Array.isArray(blacklist_phones) ? blacklist_phones : null,
+      typeof blacklist_all === 'boolean' ? blacklist_all : null,
+      agent_prompts && typeof agent_prompts === 'object' ? JSON.stringify(agent_prompts) : null,
+      Array.isArray(faqs) ? JSON.stringify(faqs) : null,
+    ])
     return this.getAISettings()
   },
 
@@ -247,5 +274,19 @@ export const db = {
 
   async deleteCatalogImage(id) {
     await pool.query('DELETE FROM catalog_images WHERE id = $1', [id])
+  },
+
+  async updateCatalogImage(id, data) {
+    const { name, description, context_when, image_data } = data
+    const { rows } = await pool.query(`
+      UPDATE catalog_images SET
+        name         = COALESCE($2, name),
+        description  = COALESCE($3, description),
+        context_when = COALESCE($4, context_when),
+        image_data   = COALESCE($5, image_data)
+      WHERE id = $1
+      RETURNING id, name, description, context_when, created_at
+    `, [id, name || null, description || null, context_when || null, image_data || null])
+    return rows[0]
   },
 }
