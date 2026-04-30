@@ -1,17 +1,74 @@
 import pg from 'pg'
+import { createHash, randomBytes } from 'crypto'
 import dotenv from 'dotenv'
 dotenv.config()
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL })
 
-// Run once on startup — idempotent (IF NOT EXISTS)
-pool.query(`
-  ALTER TABLE ai_settings
-    ADD COLUMN IF NOT EXISTS blacklist_phones TEXT[]  DEFAULT '{}',
-    ADD COLUMN IF NOT EXISTS blacklist_all    BOOLEAN DEFAULT false,
-    ADD COLUMN IF NOT EXISTS agent_prompts    JSONB   DEFAULT '{}',
-    ADD COLUMN IF NOT EXISTS faqs             JSONB   DEFAULT '[]'
-`).catch(e => console.error('[DB migration]', e.message))
+// ── Startup migrations — idempotent ──────────────────────────────
+async function runMigrations() {
+  try {
+    await pool.query(`
+      ALTER TABLE ai_settings
+        ADD COLUMN IF NOT EXISTS blacklist_phones TEXT[]        DEFAULT '{}',
+        ADD COLUMN IF NOT EXISTS blacklist_all    BOOLEAN       DEFAULT false,
+        ADD COLUMN IF NOT EXISTS agent_prompts    JSONB         DEFAULT '{}',
+        ADD COLUMN IF NOT EXISTS faqs             JSONB         DEFAULT '[]',
+        ADD COLUMN IF NOT EXISTS agent_active     JSONB         DEFAULT '{}',
+        ADD COLUMN IF NOT EXISTS business_name    VARCHAR(100),
+        ADD COLUMN IF NOT EXISTS business_logo    TEXT
+    `)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id              SERIAL PRIMARY KEY,
+        username        VARCHAR(100) UNIQUE NOT NULL,
+        password_hash   VARCHAR(255) NOT NULL,
+        name            VARCHAR(100),
+        role            VARCHAR(30)  NOT NULL DEFAULT 'usuario',
+        active          BOOLEAN      DEFAULT true,
+        session_token   VARCHAR(255),
+        session_expires TIMESTAMPTZ,
+        created_at      TIMESTAMPTZ  DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ  DEFAULT NOW()
+      )
+    `)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS activity_log (
+        id         SERIAL PRIMARY KEY,
+        user_id    INTEGER,
+        username   VARCHAR(100),
+        action     VARCHAR(200) NOT NULL,
+        details    JSONB,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `)
+    // Default superadmin if no users exist
+    const existing = await pool.query('SELECT COUNT(*) FROM users')
+    if (parseInt(existing.rows[0].count) === 0) {
+      const salt = randomBytes(16).toString('hex')
+      const hash = createHash('sha256').update(salt + 'admin123').digest('hex')
+      await pool.query(
+        `INSERT INTO users (username, password_hash, name, role) VALUES ('admin','${salt}:${hash}','Administrador','superadmin')`
+      )
+      console.log('[DB] Usuario admin creado — cambiá la contraseña desde Usuarios')
+    }
+    console.log('[DB] Migraciones completadas')
+  } catch (e) {
+    console.error('[DB migration]', e.message)
+  }
+}
+runMigrations()
+
+// ── Auth helpers ─────────────────────────────────────────────────
+export function hashPassword(password) {
+  const salt = randomBytes(16).toString('hex')
+  const hash = createHash('sha256').update(salt + password).digest('hex')
+  return `${salt}:${hash}`
+}
+export function verifyPassword(password, stored) {
+  const [salt, hash] = stored.split(':')
+  return createHash('sha256').update(salt + password).digest('hex') === hash
+}
 
 export const db = {
   // ── WhatsApp ──────────────────────────────────────────────────────
@@ -75,7 +132,8 @@ export const db = {
       personality_prompt, business_description, welcome_message, goals, restrictions,
       admin_phone, redirect_phone,
       allowed_phones, blacklist_phones, blacklist_all,
-      agent_prompts, faqs,
+      agent_prompts, faqs, agent_active,
+      business_name, business_logo,
     } = data
     await pool.query(`
       UPDATE ai_settings SET
@@ -91,18 +149,100 @@ export const db = {
         blacklist_all        = COALESCE($10, blacklist_all),
         agent_prompts        = COALESCE($11, agent_prompts),
         faqs                 = COALESCE($12, faqs),
+        agent_active         = COALESCE($13, agent_active),
+        business_name        = COALESCE($14, business_name),
+        business_logo        = COALESCE($15, business_logo),
         updated_at           = NOW()
       WHERE id = (SELECT id FROM ai_settings LIMIT 1)
     `, [
       personality_prompt, business_description, welcome_message, goals, restrictions,
       admin_phone || null, redirect_phone || null,
-      Array.isArray(allowed_phones)  ? allowed_phones  : null,
+      Array.isArray(allowed_phones)   ? allowed_phones   : null,
       Array.isArray(blacklist_phones) ? blacklist_phones : null,
       typeof blacklist_all === 'boolean' ? blacklist_all : null,
       agent_prompts && typeof agent_prompts === 'object' ? JSON.stringify(agent_prompts) : null,
-      Array.isArray(faqs) ? JSON.stringify(faqs) : null,
+      Array.isArray(faqs)            ? JSON.stringify(faqs)          : null,
+      agent_active && typeof agent_active === 'object' ? JSON.stringify(agent_active) : null,
+      business_name || null,
+      business_logo !== undefined ? (business_logo || null) : undefined,
     ])
     return this.getAISettings()
+  },
+
+  // ── Users ─────────────────────────────────────────────────────────
+  async getUsers() {
+    const { rows } = await pool.query(
+      `SELECT id, username, name, role, active, created_at, updated_at FROM users ORDER BY created_at ASC`
+    )
+    return rows
+  },
+
+  async getUserByToken(token) {
+    const { rows } = await pool.query(
+      `SELECT id, username, name, role, active FROM users WHERE session_token = $1 AND session_expires > NOW() AND active = true LIMIT 1`,
+      [token]
+    )
+    return rows[0] || null
+  },
+
+  async loginUser(username, password) {
+    const { rows } = await pool.query(`SELECT * FROM users WHERE username = $1 AND active = true`, [username])
+    if (!rows[0]) return null
+    if (!verifyPassword(password, rows[0].password_hash)) return null
+    const token = randomBytes(32).toString('hex')
+    await pool.query(
+      `UPDATE users SET session_token = $1, session_expires = NOW() + INTERVAL '7 days', updated_at = NOW() WHERE id = $2`,
+      [token, rows[0].id]
+    )
+    return { id: rows[0].id, username: rows[0].username, name: rows[0].name, role: rows[0].role, token }
+  },
+
+  async createUser(data) {
+    const { username, password, name, role } = data
+    const password_hash = hashPassword(password)
+    const { rows } = await pool.query(
+      `INSERT INTO users (username, password_hash, name, role) VALUES ($1,$2,$3,$4) RETURNING id, username, name, role, active, created_at`,
+      [username, password_hash, name || username, role || 'usuario']
+    )
+    return rows[0]
+  },
+
+  async updateUser(id, data) {
+    const { name, role, active, password } = data
+    if (password) {
+      const password_hash = hashPassword(password)
+      await pool.query(
+        `UPDATE users SET name=COALESCE($2,name), role=COALESCE($3,role), active=COALESCE($4,active), password_hash=$5, updated_at=NOW() WHERE id=$1`,
+        [id, name || null, role || null, active ?? null, password_hash]
+      )
+    } else {
+      await pool.query(
+        `UPDATE users SET name=COALESCE($2,name), role=COALESCE($3,role), active=COALESCE($4,active), updated_at=NOW() WHERE id=$1`,
+        [id, name || null, role || null, active ?? null]
+      )
+    }
+    const { rows } = await pool.query(`SELECT id, username, name, role, active, created_at FROM users WHERE id=$1`, [id])
+    return rows[0]
+  },
+
+  async deleteUser(id) {
+    await pool.query(`DELETE FROM users WHERE id=$1`, [id])
+  },
+
+  // ── Activity log ──────────────────────────────────────────────────
+  async logActivity(userId, username, action, details = null) {
+    await pool.query(
+      `INSERT INTO activity_log (user_id, username, action, details) VALUES ($1,$2,$3,$4)`,
+      [userId || null, username || 'sistema', action, details ? JSON.stringify(details) : null]
+    )
+  },
+
+  async getActivityLog(limit = 100) {
+    const { rows } = await pool.query(
+      `SELECT id, username, action, details, created_at FROM activity_log ORDER BY created_at DESC LIMIT $1`,
+      [limit]
+    )
+    return rows
   },
 
   async getConversations() {

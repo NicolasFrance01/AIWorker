@@ -204,16 +204,23 @@ const DASHBOARD_SECRET = process.env.DASHBOARD_SECRET || ''
 
 function setCORS(res) {
   res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Dashboard-Key')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Dashboard-Key, X-Session-Token')
 }
 
-function checkAuth(req, res) {
-  if (!DASHBOARD_SECRET) return true
-  if (req.headers['x-dashboard-key'] === DASHBOARD_SECRET) return true
+async function checkAuth(req, res) {
+  // Legacy secret key
+  if (DASHBOARD_SECRET && req.headers['x-dashboard-key'] === DASHBOARD_SECRET) return { role: 'superadmin', username: 'system' }
+  if (!DASHBOARD_SECRET && !req.headers['x-session-token']) return { role: 'superadmin', username: 'system' }
+  // Session token
+  const token = req.headers['x-session-token']
+  if (token) {
+    const user = await db.getUserByToken(token).catch(() => null)
+    if (user) return user
+  }
   res.writeHead(401, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify({ error: 'Unauthorized' }))
-  return false
+  return null
 }
 
 function json(res, data, status = 200) {
@@ -271,9 +278,34 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // ── Auth público ─────────────────────────────────────────────────────
+
+  if (url === '/api/auth/login' && req.method === 'POST') {
+    try {
+      const { username, password } = await parseBody(req)
+      if (!username || !password) return json(res, { error: 'Credenciales requeridas' }, 400)
+      const user = await db.loginUser(username, password)
+      if (!user) return json(res, { error: 'Usuario o contraseña incorrectos' }, 401)
+      await db.logActivity(user.id, user.username, 'login', { ip: req.socket?.remoteAddress })
+      return json(res, { ok: true, user: { id: user.id, username: user.username, name: user.name, role: user.role }, token: user.token })
+    } catch (err) {
+      return json(res, { error: err.message }, 500)
+    }
+  }
+
+  // ── GET /api/users/me — validate session token (protected via token only) ─
+  if (url === '/api/users/me' && req.method === 'GET') {
+    const token = req.headers['x-session-token']
+    if (!token) return json(res, { error: 'No token' }, 401)
+    const user = await db.getUserByToken(token).catch(() => null)
+    if (!user) return json(res, { error: 'Invalid token' }, 401)
+    return json(res, { user })
+  }
+
   // ── Endpoints protegidos (Dashboard API) ─────────────────────────────
 
-  if (!checkAuth(req, res)) return
+  const authUser = await checkAuth(req, res)
+  if (!authUser) return
 
   // GET /api/status
   if (url === '/api/status' && req.method === 'GET') {
@@ -479,6 +511,66 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       return json(res, { error: err.message }, 500)
     }
+  }
+
+  // ── Users CRUD ───────────────────────────────────────────────────
+
+  // GET /api/users
+  if (url === '/api/users' && req.method === 'GET') {
+    try {
+      const users = await db.getUsers()
+      return json(res, { users })
+    } catch (err) { return json(res, { error: err.message }, 500) }
+  }
+
+  // POST /api/users
+  if (url === '/api/users' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req)
+      if (!body.username || !body.password) return json(res, { error: 'username y password requeridos' }, 400)
+      const user = await db.createUser(body)
+      await db.logActivity(authUser.id, authUser.username, 'crear_usuario', { username: body.username, role: body.role })
+      return json(res, { ok: true, user })
+    } catch (err) { return json(res, { error: err.message }, 500) }
+  }
+
+  // PUT /api/users/:id
+  const userMatch = url.match(/^\/api\/users\/(\d+)$/)
+  if (userMatch && req.method === 'PUT') {
+    try {
+      const body = await parseBody(req)
+      const user = await db.updateUser(parseInt(userMatch[1]), body)
+      await db.logActivity(authUser.id, authUser.username, 'editar_usuario', { id: userMatch[1] })
+      return json(res, { ok: true, user })
+    } catch (err) { return json(res, { error: err.message }, 500) }
+  }
+
+  // DELETE /api/users/:id
+  if (userMatch && req.method === 'DELETE') {
+    try {
+      await db.deleteUser(parseInt(userMatch[1]))
+      await db.logActivity(authUser.id, authUser.username, 'eliminar_usuario', { id: userMatch[1] })
+      return json(res, { ok: true })
+    } catch (err) { return json(res, { error: err.message }, 500) }
+  }
+
+  // ── Activity log ─────────────────────────────────────────────────
+
+  // GET /api/activity
+  if (url === '/api/activity' && req.method === 'GET') {
+    try {
+      const logs = await db.getActivityLog(200)
+      return json(res, { logs })
+    } catch (err) { return json(res, { error: err.message }, 500) }
+  }
+
+  // POST /api/activity
+  if (url === '/api/activity' && req.method === 'POST') {
+    try {
+      const { action, details } = await parseBody(req)
+      await db.logActivity(authUser.id, authUser.username, action, details)
+      return json(res, { ok: true })
+    } catch (err) { return json(res, { error: err.message }, 500) }
   }
 
   // GET /logs/stream — SSE en tiempo real
