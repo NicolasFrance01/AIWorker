@@ -16,6 +16,8 @@ let restartCount = 0
 const startTime = Date.now()
 let latestQR = null
 let connectionStatus = 'disconnected'  // 'disconnected' | 'qr' | 'connected' | 'logged_out'
+let activeSock = null  // exposed for manual send + recontacto
+const notifClients = new Set()  // SSE clients for live notifications
 
 // ── Log capture para SSE ──────────────────────────────────────────────
 const LOG_BUFFER_SIZE = 300
@@ -43,7 +45,7 @@ async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info')
   const { version } = await fetchLatestBaileysVersion()
 
-  const sock = makeWASocket({
+  const sock = activeSock = makeWASocket({
     version,
     auth: state,
     printQRInTerminal: false,
@@ -160,23 +162,58 @@ async function connectToWhatsApp() {
         if (hasAudio) audioBuffer = await downloadMediaMessage(msg, 'buffer', {})
 
         const contact = await db.upsertContact(identifier, msg.pushName || '')
+
+        // Detectar si es primer mensaje de este contacto (history vacío antes de guardar)
+        const prevHistory = await db.getRecentMessages(contact.conversation_id, 1)
+        const isFirstMessage = prevHistory.length === 0
+
         const history = await db.getRecentMessages(contact.conversation_id, 10)
+
+        // Reset recontacto porque el cliente volvió a escribir
+        await db.resetRecontact(contact.conversation_id).catch(() => {})
+
         const result  = await getAIReply({ text, hasImage, imageBuffer, hasAudio, audioBuffer, audioMime, history, clientName: msg.pushName || identifier })
 
-        const { reply, agentType, isHandoff, summary } = result
+        const { reply, agentType, isHandoff, summary, imageInfo } = result
 
         const saved = text || (hasImage ? '[imagen]' : hasAudio ? '[audio]' : '[mensaje]')
         await db.saveMessage(contact.conversation_id, 'client', saved, 'cliente')
         await db.saveMessage(contact.conversation_id, 'ai', reply, agentType)
         await sock.sendMessage(msg.key.remoteJid, { text: reply })
 
-        // Agente de redirección: enviar resumen al asesor (número desde el dashboard)
+        // Enviar imagen de producto si corresponde
+        if (imageInfo?.imageData) {
+          try {
+            const base64 = imageInfo.imageData.replace(/^data:image\/\w+;base64,/, '')
+            const imgBuffer = Buffer.from(base64, 'base64')
+            await sock.sendMessage(msg.key.remoteJid, { image: imgBuffer, caption: imageInfo.productName || '' })
+            await createAndPushNotif('image_sent', 'Imagen enviada', `Se envió imagen de "${imageInfo.productName}" a ${msg.pushName || identifier}`, { convId: contact.conversation_id, phone: identifier, productName: imageInfo.productName })
+          } catch (imgErr) {
+            console.error('[IMG] Error enviando imagen:', imgErr.message)
+            // Sin imagen: avisar que no tiene pero notificar al admin para que la cargue
+            await sock.sendMessage(msg.key.remoteJid, { text: `No tengo cargada la imagen de ese producto por el momento, pero te puedo dar más información. ¿Querés que te conecte con un asesor?` })
+            await createAndPushNotif('missing_image', `Falta imagen: ${imageInfo.productName}`, `${identifier} pidió ver "${imageInfo.productName}" pero no tiene imágenes cargadas`, { convId: contact.conversation_id, phone: identifier, productId: imageInfo.productId, productName: imageInfo.productName })
+          }
+        } else if (agentType === 'productos' && /foto|imagen|ver|mostrá|catálogo/i.test(text || '')) {
+          // El cliente pide imágenes pero no encontramos producto específico
+          await createAndPushNotif('missing_image', 'Cliente pide imágenes', `${identifier} pidió ver imágenes/catálogo de productos`, { convId: contact.conversation_id, phone: identifier })
+        }
+
+        // Notificación: primer contacto
+        if (isFirstMessage) {
+          await createAndPushNotif('new_contact', 'Nuevo cliente', `${msg.pushName || identifier} se contactó por primera vez`, { convId: contact.conversation_id, phone: identifier, name: msg.pushName || '' })
+        } else {
+          // Notificación: conversación activa (no nuevo contacto)
+          await createAndPushNotif('conv_active', 'Conversación activa', `${msg.pushName || identifier}: "${(text || saved).substring(0, 60)}"`, { convId: contact.conversation_id, phone: identifier, name: msg.pushName || '' })
+        }
+
+        // Agente de redirección: enviar resumen al asesor
         if (isHandoff && summary) {
           const clientName = msg.pushName || identifier
           const adminMsg =
             `🔔 *Cliente derivado a asesor*\n\n` +
             `👤 *Cliente:* ${clientName}\n` +
-            `📱 *Número:* ${identifier}\n\n` +
+            `📱 *Número:* wa.me/+${identifier}\n\n` +
             `📋 *Resumen de la consulta:*\n${summary}\n\n` +
             `⏰ ${new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}`
           try {
@@ -185,6 +222,7 @@ async function connectToWhatsApp() {
           } catch (e) {
             console.error('[REDIR] Error enviando resumen al asesor:', e.message)
           }
+          await createAndPushNotif('handoff', 'Derivación a asesor', `${clientName} fue derivado al asesor`, { convId: contact.conversation_id, phone: identifier, name: clientName, summary, waLink: `https://wa.me/${identifier}` })
         }
 
         messageCount++
@@ -198,6 +236,44 @@ async function connectToWhatsApp() {
 
   return sock
 }
+
+// ── Push notification to SSE clients ─────────────────────────────────
+function pushNotification(notif) {
+  const data = `data: ${JSON.stringify(notif)}\n\n`
+  for (const client of notifClients) {
+    try { client.write(data) } catch { notifClients.delete(client) }
+  }
+}
+
+async function createAndPushNotif(type, title, body, data = {}) {
+  try {
+    const n = await db.createNotification(type, title, body, data)
+    pushNotification(n)
+  } catch (e) {
+    console.error('[Notif]', e.message)
+  }
+}
+
+// ── Recontacto cron (cada 5 min) ─────────────────────────────────────
+cron.schedule('*/5 * * * *', async () => {
+  if (!activeSock || connectionStatus !== 'connected') return
+  try {
+    const convs = await db.getConversationsForRecontact()
+    for (const conv of convs) {
+      const history = await db.getRecentMessages(conv.conversation_id, 10)
+      const result  = await getAIReply({ text: '', hasImage: false, imageBuffer: null, hasAudio: false, audioBuffer: null, history, clientName: conv.name || conv.phone, agentTypeOverride: 'recontacto' })
+      if (result.reply) {
+        await activeSock.sendMessage(`${conv.phone}@s.whatsapp.net`, { text: result.reply })
+        await db.saveMessage(conv.conversation_id, 'ai', result.reply, 'recontacto')
+        await db.setRecontactSent(conv.conversation_id)
+        await createAndPushNotif('recontacto', 'Recontacto enviado', `Seguimiento automático a ${conv.name || conv.phone}`, { convId: conv.conversation_id, phone: conv.phone, name: conv.name })
+        console.log(`[Recontacto] Enviado a ${conv.phone}`)
+      }
+    }
+  } catch (e) {
+    console.error('[Recontacto cron]', e.message)
+  }
+})
 
 // ── HTTP Server ───────────────────────────────────────────────────────
 const DASHBOARD_SECRET = process.env.DASHBOARD_SECRET || ''
@@ -571,6 +647,66 @@ const server = http.createServer(async (req, res) => {
       await db.logActivity(authUser.id, authUser.username, action, details)
       return json(res, { ok: true })
     } catch (err) { return json(res, { error: err.message }, 500) }
+  }
+
+  // ── Conversations send ───────────────────────────────────────────
+  // POST /api/conversations/:id/send
+  const convSendMatch = url.match(/^\/api\/conversations\/(\d+)\/send$/)
+  if (convSendMatch && req.method === 'POST') {
+    try {
+      const { message } = await parseBody(req)
+      const convId = parseInt(convSendMatch[1])
+      if (!message?.trim()) return json(res, { error: 'Mensaje vacío' }, 400)
+      if (!activeSock || connectionStatus !== 'connected') return json(res, { error: 'WhatsApp no conectado' }, 503)
+      const conv = await db.getConversationWithContact(convId)
+      if (!conv) return json(res, { error: 'Conversación no encontrada' }, 404)
+      await activeSock.sendMessage(`${conv.phone}@s.whatsapp.net`, { text: message.trim() })
+      await db.saveMessage(convId, 'human', message.trim(), 'human')
+      await db.logActivity(authUser.id, authUser.username, 'mensaje_manual', { convId, phone: conv.phone, preview: message.substring(0, 50) })
+      await createAndPushNotif('human_msg', 'Mensaje manual enviado', `${authUser.name || authUser.username} → ${conv.name || conv.phone}: "${message.substring(0, 50)}"`, { convId, phone: conv.phone })
+      return json(res, { ok: true })
+    } catch (err) { return json(res, { error: err.message }, 500) }
+  }
+
+  // ── Notifications ────────────────────────────────────────────────
+  // GET /api/notifications
+  if (url === '/api/notifications' && req.method === 'GET') {
+    try {
+      const notifications = await db.getNotifications(100)
+      const unread = await db.getUnreadCount()
+      return json(res, { notifications, unread })
+    } catch (err) { return json(res, { error: err.message }, 500) }
+  }
+
+  // PUT /api/notifications/read-all
+  if (url === '/api/notifications/read-all' && req.method === 'PUT') {
+    try {
+      await db.markAllNotificationsRead()
+      return json(res, { ok: true })
+    } catch (err) { return json(res, { error: err.message }, 500) }
+  }
+
+  // PUT /api/notifications/:id/read
+  const notifReadMatch = url.match(/^\/api\/notifications\/(\d+)\/read$/)
+  if (notifReadMatch && req.method === 'PUT') {
+    try {
+      await db.markNotificationRead(parseInt(notifReadMatch[1]))
+      return json(res, { ok: true })
+    } catch (err) { return json(res, { error: err.message }, 500) }
+  }
+
+  // GET /api/notifications/stream — SSE para notificaciones en tiempo real
+  if (url === '/api/notifications/stream' && req.method === 'GET') {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+    })
+    notifClients.add(res)
+    const keepAlive = setInterval(() => res.write(':ping\n\n'), 25000)
+    req.on('close', () => { notifClients.delete(res); clearInterval(keepAlive) })
+    return
   }
 
   // GET /logs/stream — SSE en tiempo real

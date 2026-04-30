@@ -42,6 +42,23 @@ async function runMigrations() {
         created_at TIMESTAMPTZ DEFAULT NOW()
       )
     `)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id         SERIAL PRIMARY KEY,
+        type       VARCHAR(50) NOT NULL,
+        title      VARCHAR(200) NOT NULL,
+        body       TEXT,
+        data       JSONB DEFAULT '{}',
+        read       BOOLEAN DEFAULT false,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `)
+    await pool.query(`
+      ALTER TABLE conversations
+        ADD COLUMN IF NOT EXISTS recontact_at   TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS recontact_sent BOOLEAN DEFAULT false,
+        ADD COLUMN IF NOT EXISTS recontact_min  INTEGER DEFAULT 60
+    `)
     // Default superadmin if no users exist
     const existing = await pool.query('SELECT COUNT(*) FROM users')
     if (parseInt(existing.rows[0].count) === 0) {
@@ -428,5 +445,69 @@ export const db = {
       RETURNING id, name, description, context_when, created_at
     `, [id, name || null, description || null, context_when || null, image_data || null])
     return rows[0]
+  },
+
+  // ── Notifications ─────────────────────────────────────────────────
+  async createNotification(type, title, body, data = {}) {
+    const { rows } = await pool.query(
+      `INSERT INTO notifications (type, title, body, data) VALUES ($1,$2,$3,$4) RETURNING *`,
+      [type, title, body || null, JSON.stringify(data)]
+    )
+    return rows[0]
+  },
+
+  async getNotifications(limit = 100) {
+    const { rows } = await pool.query(
+      `SELECT * FROM notifications ORDER BY created_at DESC LIMIT $1`, [limit]
+    )
+    return rows
+  },
+
+  async getUnreadCount() {
+    const { rows } = await pool.query(`SELECT COUNT(*) FROM notifications WHERE read = false`)
+    return parseInt(rows[0].count)
+  },
+
+  async markNotificationRead(id) {
+    await pool.query(`UPDATE notifications SET read = true WHERE id = $1`, [id])
+  },
+
+  async markAllNotificationsRead() {
+    await pool.query(`UPDATE notifications SET read = true WHERE read = false`)
+  },
+
+  // ── Conversation helpers ──────────────────────────────────────────
+  async getConversationWithContact(convId) {
+    const { rows } = await pool.query(`
+      SELECT conv.id, conv.last_message_at, conv.recontact_min,
+             c.phone, c.name
+      FROM conversations conv
+      JOIN contacts c ON c.id = conv.contact_id
+      WHERE conv.id = $1
+    `, [convId])
+    return rows[0] || null
+  },
+
+  async getConversationsForRecontact() {
+    const { rows } = await pool.query(`
+      SELECT conv.id AS conversation_id, COALESCE(conv.recontact_min, 60) AS recontact_min,
+             c.phone, c.name,
+             conv.last_message_at
+      FROM conversations conv
+      JOIN contacts c ON c.id = conv.contact_id
+      WHERE COALESCE(conv.recontact_sent, false) = false
+        AND conv.last_message_at IS NOT NULL
+        AND (SELECT sender FROM messages WHERE conversation_id = conv.id ORDER BY created_at DESC LIMIT 1) = 'ai'
+        AND conv.last_message_at < NOW() - (COALESCE(conv.recontact_min, 60)::text || ' minutes')::INTERVAL
+    `)
+    return rows
+  },
+
+  async setRecontactSent(convId) {
+    await pool.query(`UPDATE conversations SET recontact_sent = true WHERE id = $1`, [convId])
+  },
+
+  async resetRecontact(convId) {
+    await pool.query(`UPDATE conversations SET recontact_sent = false WHERE id = $1`, [convId])
   },
 }
