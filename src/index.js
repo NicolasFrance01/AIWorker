@@ -118,11 +118,13 @@ async function connectToWhatsApp() {
 
       console.log(`[MSG] jid=${jid} id=${identifier} lid=${isLid} name=${msg.pushName}`)
 
-      const ADMIN = process.env.ADMIN_PHONE || '5493516002716'
+      // Leer config de BD (teléfonos se gestionan desde el dashboard, no variables de entorno)
+      const settings = await db.getAISettings().catch(() => null)
+      const ADMIN    = settings?.admin_phone    || process.env.ADMIN_PHONE    || '5493516002716'
+      const REDIRECT = settings?.redirect_phone || process.env.REDIRECT_PHONE || '5493516002716'
+
       if (identifier === ADMIN) continue
 
-      // ALLOWED_PHONES acepta números Y/O LIDs separados por coma
-      // Ej en Render: ALLOWED_PHONES=5493512011783,29463626682562
       const ALLOWED = (process.env.ALLOWED_PHONES || '5493512011783,29463626682562').split(',').map(p => p.trim())
       if (!ALLOWED.includes(identifier)) {
         console.log(`[BLOQUEADO] "${identifier}" no está en whitelist [${ALLOWED.join(', ')}]`)
@@ -152,10 +154,9 @@ async function connectToWhatsApp() {
         await db.saveMessage(contact.conversation_id, 'ai', reply, agentType)
         await sock.sendMessage(msg.key.remoteJid, { text: reply })
 
-        // Agente de redirección: enviar resumen al asesor
+        // Agente de redirección: enviar resumen al asesor (número desde el dashboard)
         if (isHandoff && summary) {
           const clientName = msg.pushName || identifier
-          const REDIRECT = process.env.REDIRECT_PHONE || '5493516002716'
           const adminMsg =
             `🔔 *Cliente derivado a asesor*\n\n` +
             `👤 *Cliente:* ${clientName}\n` +

@@ -62,7 +62,7 @@ export const db = {
   },
 
   async updateAISettings(data) {
-    const { personality_prompt, business_description, welcome_message, goals, restrictions } = data
+    const { personality_prompt, business_description, welcome_message, goals, restrictions, admin_phone, redirect_phone } = data
     await pool.query(`
       UPDATE ai_settings SET
         personality_prompt   = COALESCE($1, personality_prompt),
@@ -70,9 +70,11 @@ export const db = {
         welcome_message      = COALESCE($3, welcome_message),
         goals                = COALESCE($4, goals),
         restrictions         = COALESCE($5, restrictions),
+        admin_phone          = COALESCE($6, admin_phone),
+        redirect_phone       = COALESCE($7, redirect_phone),
         updated_at           = NOW()
       WHERE id = (SELECT id FROM ai_settings LIMIT 1)
-    `, [personality_prompt, business_description, welcome_message, goals, restrictions])
+    `, [personality_prompt, business_description, welcome_message, goals, restrictions, admin_phone || null, redirect_phone || null])
     return this.getAISettings()
   },
 
