@@ -2,16 +2,10 @@ import pg from 'pg'
 import dotenv from 'dotenv'
 dotenv.config()
 
-// Pool para datos de WhatsApp (contactos, conversaciones, mensajes, configuración AI)
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL })
 
-// Pool para catálogo (productos, imágenes) — usar CATALOG_DATABASE_URL o fallback al mismo
-const catalogPool = new pg.Pool({
-  connectionString: process.env.CATALOG_DATABASE_URL || process.env.DATABASE_URL
-})
-
 export const db = {
-  // ── WhatsApp data ─────────────────────────────────────────────────
+  // ── WhatsApp ──────────────────────────────────────────────────────
   async upsertContact(phone, name) {
     const { rows } = await pool.query(`
       INSERT INTO contacts (phone, name, last_contact_at)
@@ -155,7 +149,7 @@ export const db = {
 
   // ── Products ──────────────────────────────────────────────────────
   async getProducts() {
-    const { rows } = await catalogPool.query(`
+    const { rows } = await pool.query(`
       SELECT p.*,
         COALESCE(
           json_agg(json_build_object('id', pi.id, 'name', pi.image_name, 'data', pi.image_data))
@@ -171,7 +165,7 @@ export const db = {
   },
 
   async getActiveProducts() {
-    const { rows } = await catalogPool.query(`
+    const { rows } = await pool.query(`
       SELECT id, name, category, price, description, availability, ai_when, ai_how, keywords, can_send_image
       FROM products
       WHERE active = true
@@ -182,7 +176,7 @@ export const db = {
 
   async createProduct(data) {
     const { name, category, price, description, availability, ai_when, ai_how, keywords, can_send_image } = data
-    const { rows } = await catalogPool.query(`
+    const { rows } = await pool.query(`
       INSERT INTO products (name, category, price, description, availability, ai_when, ai_how, keywords, can_send_image)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING *
@@ -193,7 +187,7 @@ export const db = {
 
   async updateProduct(id, data) {
     const { name, category, price, description, availability, ai_when, ai_how, keywords, can_send_image } = data
-    const { rows } = await catalogPool.query(`
+    const { rows } = await pool.query(`
       UPDATE products SET
         name          = COALESCE($2, name),
         category      = COALESCE($3, category),
@@ -213,11 +207,11 @@ export const db = {
   },
 
   async deleteProduct(id) {
-    await catalogPool.query('UPDATE products SET active = false WHERE id = $1', [id])
+    await pool.query('UPDATE products SET active = false WHERE id = $1', [id])
   },
 
   async addProductImage(productId, imageData, imageName) {
-    const { rows } = await catalogPool.query(`
+    const { rows } = await pool.query(`
       INSERT INTO product_images (product_id, image_data, image_name)
       VALUES ($1, $2, $3) RETURNING id, image_name
     `, [productId, imageData, imageName || null])
@@ -225,12 +219,12 @@ export const db = {
   },
 
   async deleteProductImage(imageId) {
-    await catalogPool.query('DELETE FROM product_images WHERE id = $1', [imageId])
+    await pool.query('DELETE FROM product_images WHERE id = $1', [imageId])
   },
 
   // ── Catalog images ────────────────────────────────────────────────
   async getCatalogImages() {
-    const { rows } = await catalogPool.query(`
+    const { rows } = await pool.query(`
       SELECT id, name, description, context_when, image_data, created_at
       FROM catalog_images
       WHERE active = true
@@ -241,7 +235,7 @@ export const db = {
 
   async addCatalogImage(data) {
     const { name, description, context_when, image_data } = data
-    const { rows } = await catalogPool.query(`
+    const { rows } = await pool.query(`
       INSERT INTO catalog_images (name, description, context_when, image_data)
       VALUES ($1, $2, $3, $4)
       RETURNING id, name, description, context_when, created_at
@@ -250,6 +244,6 @@ export const db = {
   },
 
   async deleteCatalogImage(id) {
-    await catalogPool.query('DELETE FROM catalog_images WHERE id = $1', [id])
+    await pool.query('DELETE FROM catalog_images WHERE id = $1', [id])
   },
 }
