@@ -34,11 +34,11 @@ export const db = {
     return contact
   },
 
-  async saveMessage(conversationId, sender, content) {
+  async saveMessage(conversationId, sender, content, agentType = 'generalista') {
     await pool.query(`
-      INSERT INTO messages (conversation_id, sender, type, content)
-      VALUES ($1, $2, 'text', $3)
-    `, [conversationId, sender, content])
+      INSERT INTO messages (conversation_id, sender, type, content, agent_type)
+      VALUES ($1, $2, 'text', $3, $4)
+    `, [conversationId, sender, content, agentType])
 
     await pool.query(
       'UPDATE conversations SET last_message_at = NOW() WHERE id = $1',
@@ -97,7 +97,7 @@ export const db = {
 
   async getMessages(conversationId) {
     const { rows } = await pool.query(`
-      SELECT id, sender, type, content, created_at
+      SELECT id, sender, type, content, agent_type, created_at
       FROM messages
       WHERE conversation_id = $1
       ORDER BY created_at ASC

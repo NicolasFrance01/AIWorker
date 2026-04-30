@@ -143,16 +143,36 @@ async function connectToWhatsApp() {
 
         const contact = await db.upsertContact(identifier, msg.pushName || '')
         const history = await db.getRecentMessages(contact.conversation_id, 10)
-        const reply   = await getAIReply({ text, hasImage, imageBuffer, hasAudio, audioBuffer, audioMime, history })
+        const result  = await getAIReply({ text, hasImage, imageBuffer, hasAudio, audioBuffer, audioMime, history, clientName: msg.pushName || identifier })
+
+        const { reply, agentType, isHandoff, summary } = result
 
         const saved = text || (hasImage ? '[imagen]' : hasAudio ? '[audio]' : '[mensaje]')
-        await db.saveMessage(contact.conversation_id, 'client', saved)
-        await db.saveMessage(contact.conversation_id, 'ai', reply)
+        await db.saveMessage(contact.conversation_id, 'client', saved, 'cliente')
+        await db.saveMessage(contact.conversation_id, 'ai', reply, agentType)
         await sock.sendMessage(msg.key.remoteJid, { text: reply })
+
+        // Agente de redirección: enviar resumen al asesor
+        if (isHandoff && summary) {
+          const clientName = msg.pushName || identifier
+          const REDIRECT = process.env.REDIRECT_PHONE || '5493516002716'
+          const adminMsg =
+            `🔔 *Cliente derivado a asesor*\n\n` +
+            `👤 *Cliente:* ${clientName}\n` +
+            `📱 *Número:* ${identifier}\n\n` +
+            `📋 *Resumen de la consulta:*\n${summary}\n\n` +
+            `⏰ ${new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}`
+          try {
+            await sock.sendMessage(`${REDIRECT}@s.whatsapp.net`, { text: adminMsg })
+            console.log(`[REDIR] Resumen enviado al asesor ${REDIRECT}`)
+          } catch (e) {
+            console.error('[REDIR] Error enviando resumen al asesor:', e.message)
+          }
+        }
 
         messageCount++
         const preview = text || (hasImage ? '[imagen]' : '[audio]')
-        console.log(`[${identifier}] → "${preview.substring(0, 40)}" → "${reply.substring(0, 40)}"`)
+        console.log(`[${identifier}][${agentType}] → "${preview.substring(0, 40)}" → "${reply.substring(0, 40)}"`)
       } catch (err) {
         console.error(`Error procesando mensaje de ${identifier}:`, err.message)
       }
