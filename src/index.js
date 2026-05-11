@@ -5,6 +5,7 @@ import QRCode from 'qrcode'
 import cron from 'node-cron'
 import http from 'http'
 import dotenv from 'dotenv'
+import Groq from 'groq-sdk'
 import { db } from './db.js'
 import { getAIReply } from './ai.js'
 import { sendAdminAlert, setAdminSocket } from './alerts.js'
@@ -368,6 +369,42 @@ const server = http.createServer(async (req, res) => {
       <p><small>Recargá si expiró</small></p>
     </body></html>`)
     return
+  }
+
+  // ── EDY Dashboard Assistant (público, sin auth) ───────────────────────
+
+  if (url === '/api/assistant' && req.method === 'POST') {
+    try {
+      const { message, history = [] } = await parseBody(req)
+      if (!message?.trim()) return json(res, { reply: '¿En qué te ayudo?' })
+
+      const SYSTEM = `Sos EDY, el asistente virtual del dashboard de AIWorker para EDIFICA.
+Ayudás a los usuarios del sistema (administradores y asesores) a:
+- Navegar el dashboard: Panel de Control, Conversaciones (inbox WhatsApp), Mi Negocio (productos/servicios/turnos), Agentes IA, Notificaciones, Usuarios
+- Resolver problemas comunes: WhatsApp desconectado (ir a Panel → escanear QR), notificaciones que no llegan (revisar conexión SSE), imágenes que no se envían (verificar que el producto tenga "puede enviar imagen" activado y la imagen cargada), login que falla (verificar que el servidor Render esté activo — puede tardar 30s en iniciar)
+- Explicar módulos: Conversaciones tiene inbox en tiempo real + toma de control manual; Agentes IA muestra los 5 agentes nativos (generalista, servicios, productos, cotización, redirección) más personalizados; Gestión de Turnos tiene calendario semanal/mensual; Notificaciones tiene SSE en tiempo real con filtros
+- Diagnóstico: si el usuario reporta que algo no funciona, pedile que te describa qué ve, qué intentó y el error si hay uno
+- Escalado: si no podés resolver el problema en 2-3 intentos, recomendá contactar al AI Engineer Nico France: https://wa.me/5493516002716
+
+Respondé en español rioplatense, mensajes cortos y claros. Sé amigable pero directo. Si el problema es técnico y complejo, decí honestamente qué podés y qué no podés resolver remotamente.`
+
+      const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
+      const messages = [
+        { role: 'system', content: SYSTEM },
+        ...history.slice(-6).map(m => ({ role: m.role, content: m.content || m.text || '' })),
+        { role: 'user', content: message }
+      ]
+      const r = await groq.chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
+        messages,
+        max_tokens: 250,
+        temperature: 0.5,
+      })
+      return json(res, { reply: r.choices[0].message.content })
+    } catch (err) {
+      console.error('[Assistant]', err.message)
+      return json(res, { reply: `Tuve un problema técnico.\n\nSi el problema persiste, contactá al AI Engineer:\nhttps://wa.me/5493516002716` })
+    }
   }
 
   // ── Auth público ─────────────────────────────────────────────────────
