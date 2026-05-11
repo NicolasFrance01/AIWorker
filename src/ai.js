@@ -37,17 +37,17 @@ const SIZES_CONTEXT = `
 ⚠️ MEDIDAS: Todos los productos que mostramos son en medidas ESTÁNDAR de fábrica. Si el cliente pide medidas diferentes o modificaciones: 1) Mencioná las medidas estándar disponibles, 2) Si insiste en medidas personalizadas, informale que es posible pero requiere una visita o consulta con el asesor, 3) Invitalo al showroom (Pehuajo 2721, L-V 9-18hs) o derivalo con el asesor para concretar.`
 
 const AGENT_PROMPTS = {
-  generalista: `Sos Ediluz, asistente de EDIFICA Obras y Servicios (Córdoba, Argentina). Respondé saludos, preguntas generales y orientá al cliente hacia el servicio o producto correcto. Si el cliente no sabe bien qué necesita, hacé una pregunta para entender mejor. Sé breve, cálido y en argentino.${SIZES_CONTEXT}`,
+  generalista: `Sos EDY, asistente de EDIFICA Obras y Servicios (Córdoba, Argentina). Respondé saludos, preguntas generales y orientá al cliente hacia el servicio o producto correcto. Si el cliente no sabe bien qué necesita, hacé una pregunta para entender mejor. Sé breve, cálido y en argentino.${SIZES_CONTEXT}`,
 
   servicios: `Sos el especialista en servicios de construcción de EDIFICA. Conocés en detalle: Reformas Integrales, Impermeabilización, Estructuras, Pintura y Terminaciones, y Obras Generales. Cuando te consulten por un servicio, explicá en qué consiste, ofrecé una orientación de precio (si la tenés en el catálogo) y siempre invitá a solicitar una visita o presupuesto sin cargo. Sé técnico pero accesible.${SIZES_CONTEXT}`,
 
-  productos: `Sos el asesor de productos de EDIFICA. Manejás las marcas: PIATTI (aberturas PVC y aluminio, portones levadizos — distribuidor oficial con garantía de fábrica), LIV (mobiliario: sillones, sillas, comedor), INTERIA (cocinas y vestidores a medida), Escaleras a Medida (madera, metal y vidrio). Para productos físicos, invitá siempre a visitar el showroom en Pehuajo 2721, Córdoba (L-V 9-18hs) o pedir catálogo por WhatsApp. Si el cliente quiere imágenes o fotos, respondé exactamente con la frase: [IMAGEN_REQUERIDA:nombre_del_producto]${SIZES_CONTEXT}`,
+  productos: `Sos el asesor de productos de EDIFICA. Manejás las marcas: PIATTI (aberturas PVC y aluminio, portones levadizos — distribuidor oficial con garantía de fábrica), LIV (mobiliario: sillones, sillas, comedor), INTERIA (cocinas y vestidores a medida), Escaleras a Medida (madera, metal y vidrio). Para productos físicos, invitá siempre a visitar el showroom en Pehuajo 2721, Córdoba (L-V 9-18hs) o pedir catálogo por WhatsApp. Cuando el cliente pida imágenes o fotos, describí brevemente el producto y decile que "a continuación te muestro una imagen" — el sistema la envía automáticamente. NUNCA uses frases como [envía fotos], [enviando imagen], [ver fotos] ni ninguna acción entre corchetes. NUNCA simules enviar archivos.${SIZES_CONTEXT}`,
 
   cotizacion: `Sos el agente de cotizaciones de EDIFICA. Tu objetivo es capturar la consulta del cliente para que un asesor pueda contactarlo con un presupuesto a medida. Preguntá: qué necesita, en qué zona está, cuándo quiere iniciar. Al final siempre ofrecé: "Te contactamos en las próximas horas para darte una cotización exacta. ¿Querés dejarnos tus datos o preferís escribirnos a contactanos@edifica.com?". También podés dar rangos orientativos si los tenés.${SIZES_CONTEXT}`,
 
   redireccion: `Sos el agente de derivación de EDIFICA. El cliente quiere hablar con un asesor humano. Tu respuesta debe: 1) Agradecerle por su consulta, 2) Dar el link de WhatsApp del asesor: https://wa.me/543516002716, 3) Decirle que el asesor ya tiene el resumen de su consulta y lo va a atender rápido. Sé cálido y breve.`,
 
-  recontacto: `Sos Ediluz, asistente de EDIFICA. Estás retomando una conversación con un cliente que quedó inconclusa. Tu objetivo es: 1) Saludar cordialmente recordándoles que habían hablado antes, 2) Preguntar si pudo avanzar o si necesita algo más, 3) Si estaba esperando información, ofrecele nueva ayuda o derivalo con un asesor. Sé breve, cálido y no insistente.`,
+  recontacto: `Sos EDY, asistente de EDIFICA. Estás retomando una conversación con un cliente que quedó inconclusa. Tu objetivo es: 1) Saludar cordialmente recordándoles que habían hablado antes, 2) Preguntar si pudo avanzar o si necesita algo más, 3) Si estaba esperando información, ofrecele nueva ayuda o derivalo con un asesor. Sé breve, cálido y no insistente.`,
 }
 
 // ── Construir system prompt completo ────────────────────────────
@@ -89,7 +89,7 @@ async function buildSystemPrompt(agentType, settings) {
     }
   } catch {}
 
-  return `${base}${businessCtx}${productContext}${faqContext}\n\nReglas: Respondé en español rioplatense, mensajes cortos y claros (WhatsApp), nunca inventes precios exactos sin visita previa.`
+  return `${base}${businessCtx}${productContext}${faqContext}\n\nReglas: Respondé en español rioplatense, mensajes cortos y claros (WhatsApp), nunca inventes precios exactos sin visita previa. NUNCA uses frases entre corchetes como [envía fotos] ni simules acciones.`
 }
 
 // ── Generar resumen de conversación para el asesor ───────────────
@@ -142,10 +142,17 @@ async function findProductImage(text, agentType) {
     const products = await db.getProducts()
     const t = (text || '').toLowerCase()
     for (const p of products) {
-      if (!p.can_send_image || !p.images?.length) continue
+      if (!p.can_send_image) continue
       const kws = [...(p.keywords || []), p.name.toLowerCase(), p.category]
       if (kws.some(k => k && t.includes(k.toLowerCase()))) {
-        return { productId: p.id, productName: p.name, imageData: p.images[0].data, imageName: p.images[0].name }
+        const hasImg = p.images?.length > 0
+        return {
+          productId: p.id,
+          productName: p.name,
+          productDescription: p.description || null,
+          imageData: hasImg ? p.images[0].data : null,
+          imageName: hasImg ? p.images[0].name : null,
+        }
       }
     }
   } catch {}
@@ -153,7 +160,7 @@ async function findProductImage(text, agentType) {
 }
 
 // ── Respuesta principal ──────────────────────────────────────────
-export async function getAIReply({ text, hasImage, imageBuffer, hasAudio, audioBuffer, audioMime, history, clientName = '', agentTypeOverride = null }) {
+export async function getAIReply({ text, hasImage, imageBuffer, hasAudio, audioBuffer, audioMime, history, clientName = '', agentTypeOverride = null, imagesSent = {} }) {
   const settings = await db.getAISettings()
 
   // Audio → transcribir primero
@@ -164,29 +171,38 @@ export async function getAIReply({ text, hasImage, imageBuffer, hasAudio, audioB
       agentType: 'generalista', isHandoff: false, summary: null
     }
     console.log(`[Whisper] "${transcribed.substring(0, 80)}"`)
-    return getAIReply({ text: transcribed, hasImage: false, imageBuffer: null, history, clientName })
+    return getAIReply({ text: transcribed, hasImage: false, imageBuffer: null, history, clientName, imagesSent })
   }
 
   // Detectar tipo de agente
   const agentType = agentTypeOverride || detectAgentType(text)
   const isHandoff = agentType === 'redireccion'
 
-  // Imagen → Gemini (siempre con contexto del negocio)
+  // Imagen del cliente → Gemini analiza y describe
   if (hasImage && imageBuffer) {
+    let reply = 'Recibí tu imagen. ¿Me contás más sobre lo que necesitás?'
+    let imageDescription = null
     try {
       const systemPrompt = await buildSystemPrompt('servicios', settings)
       const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' })
       const imagePart = { inlineData: { data: imageBuffer.toString('base64'), mimeType: 'image/jpeg' } }
-      const result = await model.generateContent([
+      // Descripción para el asesor (separada de la respuesta al cliente)
+      const descResult = await model.generateContent([
+        'Describí en 2-3 líneas qué se ve en esta imagen (materiales, tipo de obra, estado, colores). Sé objetivo y técnico. Solo la descripción, sin saludos.',
+        imagePart
+      ])
+      imageDescription = descResult.response.text().trim()
+      // Respuesta al cliente
+      const chatResult = await model.generateContent([
         systemPrompt,
         imagePart,
-        text || 'El cliente mandó esta imagen. Analizala y respondé de forma útil.'
+        text || 'El cliente mandó esta imagen. Analizala, identificá qué se ve y respondé de forma útil para orientarlo.'
       ])
-      return { reply: result.response.text(), agentType: 'servicios', isHandoff: false, summary: null }
+      reply = chatResult.response.text()
     } catch (err) {
       console.error('Error Gemini:', err.message)
-      return { reply: 'Recibí tu imagen, la estoy revisando. ¿Me contás más sobre lo que necesitás?', agentType: 'servicios', isHandoff: false, summary: null }
     }
+    return { reply, agentType: 'servicios', isHandoff: false, summary: null, imageDescription }
   }
 
   // Agente de redirección: generar resumen + respuesta de despedida
@@ -211,8 +227,14 @@ export async function getAIReply({ text, hasImage, imageBuffer, hasAudio, audioB
     }
   }
 
+  // Contexto de imágenes ya enviadas en esta conversación
+  const sentNames = Object.values(imagesSent).map(v => v.name).filter(Boolean)
+  const imagesCtx = sentNames.length > 0
+    ? `\n\n⚠️ Ya enviaste imagen de: ${sentNames.join(', ')}. Si el cliente insiste en esos productos con medidas u otros detalles específicos, derivalo al asesor (https://wa.me/543516002716) para atención personalizada. NO repitas la imagen.`
+    : ''
+
   // Respuesta de texto normal con agente especializado
-  const systemPrompt = await buildSystemPrompt(agentType, settings)
+  const systemPrompt = await buildSystemPrompt(agentType, settings) + imagesCtx
   try {
     const messages = [
       { role: 'system', content: systemPrompt },
@@ -227,14 +249,12 @@ export async function getAIReply({ text, hasImage, imageBuffer, hasAudio, audioB
     })
     let reply = response.choices[0].message.content
 
-    // Detectar si el cliente pide imágenes o si el contexto sugiere enviarlas
-    const wantsImage = /foto|imagen|photo|picture|ver|mostrar|tenés foto|mandame|como queda|como se ve/i.test(text || '')
-    const imageInfo = (wantsImage || reply.includes('[IMAGEN_REQUERIDA:'))
-      ? await findProductImage(text, agentType)
-      : null
+    // Limpiar cualquier tag residual entre corchetes
+    reply = reply.replace(/\[[^\]]{0,60}\]/g, '').trim()
 
-    // Limpiar el tag interno del reply si quedó
-    reply = reply.replace(/\[IMAGEN_REQUERIDA:[^\]]*\]/g, '').trim()
+    // Detectar si el cliente pide imágenes
+    const wantsImage = /foto|imagen|photo|picture|ver|mostrar|tenés foto|mandame|como queda|como se ve/i.test(text || '')
+    const imageInfo = wantsImage ? await findProductImage(text, agentType) : null
 
     return { reply, agentType, isHandoff: false, summary: null, imageInfo }
   } catch (err) {

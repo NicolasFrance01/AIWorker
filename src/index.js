@@ -172,52 +172,68 @@ async function connectToWhatsApp() {
         // Reset recontacto porque el cliente volvió a escribir
         await db.resetRecontact(contact.conversation_id).catch(() => {})
 
-        const result  = await getAIReply({ text, hasImage, imageBuffer, hasAudio, audioBuffer, audioMime, history, clientName: msg.pushName || identifier })
+        // Imágenes ya enviadas en esta conversación
+        const imagesSent = await db.getImagesSent(contact.conversation_id).catch(() => ({}))
 
-        const { reply, agentType, isHandoff, summary, imageInfo } = result
+        const result = await getAIReply({ text, hasImage, imageBuffer, hasAudio, audioBuffer, audioMime, history, clientName: msg.pushName || identifier, imagesSent })
 
-        const saved = text || (hasImage ? '[imagen]' : hasAudio ? '[audio]' : '[mensaje]')
+        const { reply, agentType, isHandoff, summary, imageInfo, imageDescription } = result
+
+        // Si el cliente mandó imagen, guardar la descripción como contexto en el historial
+        const saved = text || (hasImage && imageDescription ? `[imagen: ${imageDescription.substring(0, 100)}]` : hasImage ? '[imagen]' : hasAudio ? '[audio]' : '[mensaje]')
         await db.saveMessage(contact.conversation_id, 'client', saved, 'cliente')
         await db.saveMessage(contact.conversation_id, 'ai', reply, agentType)
         await sock.sendMessage(msg.key.remoteJid, { text: reply })
 
-        // Enviar imagen de producto si corresponde
-        if (imageInfo?.imageData) {
-          try {
-            const base64 = imageInfo.imageData.replace(/^data:image\/\w+;base64,/, '')
-            const imgBuffer = Buffer.from(base64, 'base64')
-            await sock.sendMessage(msg.key.remoteJid, { image: imgBuffer, caption: imageInfo.productName || '' })
-            await createAndPushNotif('image_sent', 'Imagen enviada', `Se envió imagen de "${imageInfo.productName}" a ${msg.pushName || identifier}`, { convId: contact.conversation_id, phone: identifier, productName: imageInfo.productName })
-          } catch (imgErr) {
-            console.error('[IMG] Error enviando imagen:', imgErr.message)
-            // Sin imagen: avisar que no tiene pero notificar al admin para que la cargue
-            await sock.sendMessage(msg.key.remoteJid, { text: `No tengo cargada la imagen de ese producto por el momento, pero te puedo dar más información. ¿Querés que te conecte con un asesor?` })
-            await createAndPushNotif('missing_image', `Falta imagen: ${imageInfo.productName}`, `${identifier} pidió ver "${imageInfo.productName}" pero no tiene imágenes cargadas`, { convId: contact.conversation_id, phone: identifier, productId: imageInfo.productId, productName: imageInfo.productName })
+        // Enviar imagen de producto (solo si no fue enviada ya en esta conversación)
+        if (imageInfo) {
+          const productKey = String(imageInfo.productId || imageInfo.productName || 'unknown')
+          const alreadySent = !!imagesSent[productKey]
+
+          if (!alreadySent && imageInfo.imageData) {
+            try {
+              const base64 = imageInfo.imageData.replace(/^data:image\/\w+;base64,/, '')
+              const imgBuffer = Buffer.from(base64, 'base64')
+              await sock.sendMessage(msg.key.remoteJid, { image: imgBuffer, caption: imageInfo.productName || '' })
+              await db.markImageSent(contact.conversation_id, imageInfo.productId, imageInfo.productName)
+              await createAndPushNotif('image_sent', 'Imagen enviada', `Se envió imagen de "${imageInfo.productName}" a ${msg.pushName || identifier}`, { convId: contact.conversation_id, phone: identifier, productName: imageInfo.productName })
+            } catch (imgErr) {
+              console.error('[IMG] Error enviando imagen:', imgErr.message)
+            }
+          }
+          // Si el producto existe pero no tiene imagen cargada
+          if (!imageInfo.imageData) {
+            const prodDesc = imageInfo.productDescription ? `\n\n${imageInfo.productDescription}` : ''
+            await sock.sendMessage(msg.key.remoteJid, { text: `Por el momento estamos cargando las imágenes de ${imageInfo.productName}.${prodDesc}\n\nPronto las podrás ver aquí. Si querés más detalles, podés contactar a nuestro asesor 👇\nhttps://wa.me/543516002716` })
+            await createAndPushNotif('missing_image', `Imagen faltante: ${imageInfo.productName}`, `${msg.pushName || identifier} pidió ver "${imageInfo.productName}" pero no tiene imágenes cargadas`, { convId: contact.conversation_id, phone: identifier, productId: imageInfo.productId, productName: imageInfo.productName })
           }
         } else if (agentType === 'productos' && /foto|imagen|ver|mostrá|catálogo/i.test(text || '')) {
-          // El cliente pide imágenes pero no encontramos producto específico
-          await createAndPushNotif('missing_image', 'Cliente pide imágenes', `${identifier} pidió ver imágenes/catálogo de productos`, { convId: contact.conversation_id, phone: identifier })
+          await createAndPushNotif('missing_image', 'Cliente pide imágenes', `${msg.pushName || identifier} pidió ver imágenes/catálogo pero no se encontró producto específico`, { convId: contact.conversation_id, phone: identifier })
         }
 
         // Notificación: primer contacto
         if (isFirstMessage) {
           await createAndPushNotif('new_contact', 'Nuevo cliente', `${msg.pushName || identifier} se contactó por primera vez`, { convId: contact.conversation_id, phone: identifier, name: msg.pushName || '' })
         } else {
-          // Notificación: conversación activa (no nuevo contacto)
           await createAndPushNotif('conv_active', 'Conversación activa', `${msg.pushName || identifier}: "${(text || saved).substring(0, 60)}"`, { convId: contact.conversation_id, phone: identifier, name: msg.pushName || '' })
         }
 
         // Agente de redirección: enviar resumen al asesor
         if (isHandoff && summary) {
           const clientName = msg.pushName || identifier
+          const imgLine = imageDescription ? `\n🖼️ *Imagen enviada por el cliente:* ${imageDescription}\n` : ''
           const adminMsg =
             `🔔 *Cliente derivado a asesor*\n\n` +
             `👤 *Cliente:* ${clientName}\n` +
             `📱 *Número:* wa.me/+${identifier}\n\n` +
-            `📋 *Resumen de la consulta:*\n${summary}\n\n` +
+            `📋 *Resumen de la consulta:*\n${summary}${imgLine}\n` +
             `⏰ ${new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}`
           try {
             await sock.sendMessage(`${REDIRECT}@s.whatsapp.net`, { text: adminMsg })
+            // Si el cliente mandó imagen, reenviarla al asesor también
+            if (imageBuffer && imageDescription) {
+              await sock.sendMessage(`${REDIRECT}@s.whatsapp.net`, { image: imageBuffer, caption: `📎 Imagen enviada por ${clientName}` })
+            }
             console.log(`[REDIR] Resumen enviado al asesor ${REDIRECT}`)
           } catch (e) {
             console.error('[REDIR] Error enviando resumen al asesor:', e.message)
@@ -707,6 +723,61 @@ const server = http.createServer(async (req, res) => {
     const keepAlive = setInterval(() => res.write(':ping\n\n'), 25000)
     req.on('close', () => { notifClients.delete(res); clearInterval(keepAlive) })
     return
+  }
+
+  // ── Appointments ─────────────────────────────────────────────────
+  // GET /api/appointments?from=YYYY-MM-DD&to=YYYY-MM-DD
+  if (url.startsWith('/api/appointments') && req.method === 'GET') {
+    const apptMatch = url.match(/^\/api\/appointments\/(\d+)$/)
+    if (apptMatch) {
+      try {
+        const a = await db.getAppointment(parseInt(apptMatch[1]))
+        if (!a) return json(res, { error: 'No encontrado' }, 404)
+        return json(res, { appointment: a })
+      } catch (err) { return json(res, { error: err.message }, 500) }
+    }
+    try {
+      const params = new URL(url, 'http://x').searchParams
+      const appts = await db.getAppointments({ from: params.get('from'), to: params.get('to') })
+      return json(res, { appointments: appts })
+    } catch (err) { return json(res, { error: err.message }, 500) }
+  }
+
+  // POST /api/appointments
+  if (url === '/api/appointments' && req.method === 'POST') {
+    try {
+      const data = await parseBody(req)
+      if (!data.service || !data.appt_date || !data.time_start) return json(res, { error: 'Faltan campos: service, appt_date, time_start' }, 400)
+      data.agent_name = data.agent_name || authUser.name || authUser.username
+      const appt = await db.createAppointment(data)
+      await db.logActivity(authUser.id, authUser.username, 'crear_turno', { apptId: appt.id, service: appt.service, date: appt.appt_date })
+      // Notificar al asesor por WhatsApp
+      if (activeSock && connectionStatus === 'connected') {
+        const msg = `📅 *Nuevo turno agendado*\n\nServicio: ${appt.service}\nFecha: ${appt.appt_date}\nHorario: ${appt.time_start}\nDuración: ${appt.duration}min\nAgente: ${appt.agent_name || '-'}\nNotas: ${appt.notes || '-'}\n\n⏰ ${new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}`
+        const adminPhone = process.env.ADMIN_PHONE || '5493516002716'
+        try { await activeSock.sendMessage(`${adminPhone}@s.whatsapp.net`, { text: msg }) } catch {}
+      }
+      await createAndPushNotif('turno', 'Turno agendado', `${appt.service} — ${appt.appt_date} ${appt.time_start}`, { apptId: appt.id })
+      return json(res, { ok: true, appointment: appt })
+    } catch (err) { return json(res, { error: err.message }, 500) }
+  }
+
+  // PUT /api/appointments/:id
+  const apptEditMatch = url.match(/^\/api\/appointments\/(\d+)$/)
+  if (apptEditMatch && req.method === 'PUT') {
+    try {
+      const data = await parseBody(req)
+      const appt = await db.updateAppointment(parseInt(apptEditMatch[1]), data)
+      return json(res, { ok: true, appointment: appt })
+    } catch (err) { return json(res, { error: err.message }, 500) }
+  }
+
+  // DELETE /api/appointments/:id
+  if (apptEditMatch && req.method === 'DELETE') {
+    try {
+      await db.deleteAppointment(parseInt(apptEditMatch[1]))
+      return json(res, { ok: true })
+    } catch (err) { return json(res, { error: err.message }, 500) }
   }
 
   // GET /logs/stream — SSE en tiempo real

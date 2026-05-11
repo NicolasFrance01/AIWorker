@@ -57,7 +57,25 @@ async function runMigrations() {
       ALTER TABLE conversations
         ADD COLUMN IF NOT EXISTS recontact_at   TIMESTAMPTZ,
         ADD COLUMN IF NOT EXISTS recontact_sent BOOLEAN DEFAULT false,
-        ADD COLUMN IF NOT EXISTS recontact_min  INTEGER DEFAULT 60
+        ADD COLUMN IF NOT EXISTS recontact_min  INTEGER DEFAULT 60,
+        ADD COLUMN IF NOT EXISTS images_sent    JSONB   DEFAULT '{}'
+    `)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS appointments (
+        id          SERIAL PRIMARY KEY,
+        contact_id  INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+        conv_id     INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+        service     VARCHAR(200) NOT NULL,
+        appt_date   DATE NOT NULL,
+        time_start  TIME NOT NULL,
+        duration    INTEGER DEFAULT 60,
+        capacity    INTEGER DEFAULT 1,
+        notes       TEXT,
+        agent_name  VARCHAR(100),
+        status      VARCHAR(30) DEFAULT 'pendiente',
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
+      )
     `)
     // Default superadmin if no users exist
     const existing = await pool.query('SELECT COUNT(*) FROM users')
@@ -509,5 +527,80 @@ export const db = {
 
   async resetRecontact(convId) {
     await pool.query(`UPDATE conversations SET recontact_sent = false WHERE id = $1`, [convId])
+  },
+
+  // ── Images sent tracking ──────────────────────────────────────────
+  async getImagesSent(convId) {
+    const { rows } = await pool.query(
+      `SELECT images_sent FROM conversations WHERE id = $1`, [convId]
+    )
+    return rows[0]?.images_sent || {}
+  },
+
+  async markImageSent(convId, productId, productName) {
+    const key = String(productId || productName || 'unknown')
+    await pool.query(
+      `UPDATE conversations SET images_sent = images_sent || $2::jsonb WHERE id = $1`,
+      [convId, JSON.stringify({ [key]: { name: productName, sent_at: new Date().toISOString() } })]
+    )
+  },
+
+  // ── Appointments ──────────────────────────────────────────────────
+  async createAppointment(data) {
+    const { contact_id, conv_id, service, appt_date, time_start, duration, capacity, notes, agent_name } = data
+    const { rows } = await pool.query(`
+      INSERT INTO appointments (contact_id, conv_id, service, appt_date, time_start, duration, capacity, notes, agent_name)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      RETURNING *
+    `, [contact_id || null, conv_id || null, service, appt_date, time_start, duration || 60, capacity || 1, notes || null, agent_name || null])
+    return rows[0]
+  },
+
+  async getAppointments({ from, to } = {}) {
+    let q = `
+      SELECT a.*, c.name AS contact_name, c.phone AS contact_phone
+      FROM appointments a
+      LEFT JOIN contacts c ON c.id = a.contact_id
+      WHERE a.status != 'cancelado'
+    `
+    const params = []
+    if (from) { params.push(from); q += ` AND a.appt_date >= $${params.length}` }
+    if (to)   { params.push(to);   q += ` AND a.appt_date <= $${params.length}` }
+    q += ` ORDER BY a.appt_date ASC, a.time_start ASC`
+    const { rows } = await pool.query(q, params)
+    return rows
+  },
+
+  async getAppointment(id) {
+    const { rows } = await pool.query(`
+      SELECT a.*, c.name AS contact_name, c.phone AS contact_phone
+      FROM appointments a
+      LEFT JOIN contacts c ON c.id = a.contact_id
+      WHERE a.id = $1
+    `, [id])
+    return rows[0] || null
+  },
+
+  async updateAppointment(id, data) {
+    const { service, appt_date, time_start, duration, capacity, notes, agent_name, status } = data
+    const { rows } = await pool.query(`
+      UPDATE appointments SET
+        service    = COALESCE($2, service),
+        appt_date  = COALESCE($3, appt_date),
+        time_start = COALESCE($4, time_start),
+        duration   = COALESCE($5, duration),
+        capacity   = COALESCE($6, capacity),
+        notes      = $7,
+        agent_name = COALESCE($8, agent_name),
+        status     = COALESCE($9, status),
+        updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+    `, [id, service || null, appt_date || null, time_start || null, duration || null, capacity || null, notes ?? null, agent_name || null, status || null])
+    return rows[0]
+  },
+
+  async deleteAppointment(id) {
+    await pool.query(`UPDATE appointments SET status = 'cancelado', updated_at = NOW() WHERE id = $1`, [id])
   },
 }
